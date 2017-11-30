@@ -241,8 +241,8 @@ MODULE_PARM(yaffs_gc_control, "i");
 #define YAFFS_USE_DIR_ITERATE
 #endif
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0))
-#define YAFFS_USE_XATTR
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 9, 0))
+#define YAFFS_USE_SEPARATE_XATTR
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3,12,0))
@@ -940,17 +940,9 @@ static int yaffs_setattr(struct dentry *dentry, struct iattr *attr)
 	return error;
 }
 
-#ifdef YAFFS_USE_XATTR
-#if (YAFFS_NEW_XATTR > 0)
-static int yaffs_setxattr(struct dentry *dentry, struct inode *inode,
-		const char *name, const void *value, size_t size, int flags)
+static int yaffs_internal_setxattr(struct dentry *dentry, struct inode *inode,
+	const char *name, const void *value, size_t size, int flags)
 {
-#else
-static int yaffs_setxattr(struct dentry *dentry, const char *name,
-		   const void *value, size_t size, int flags)
-{
-	struct inode *inode = dentry->d_inode;
-#endif
 	int error = 0;
 	struct yaffs_dev *dev;
 	struct yaffs_obj *obj = yaffs_inode_to_obj(inode);
@@ -974,16 +966,32 @@ static int yaffs_setxattr(struct dentry *dentry, const char *name,
 	return error;
 }
 
-#ifdef YAFFS_NEW_XATTR
-static ssize_t yaffs_getxattr(struct dentry * dentry, struct inode *inode,
+#if defined(YAFFS_USE_SEPARATE_XATTR)
+static int yaffs_setxattr(const struct xattr_handler *handler,
+	struct dentry *dentry, struct inode *inode, const char *name,
+	const void *value, size_t size, int flags)
+{
+	return yaffs_internal_setxattr(dentry, inode, xattr_full_name(handler, name),
+		value, size, flags);
+}
+#elif (YAFFS_NEW_XATTR > 0)
+static int yaffs_setxattr(struct dentry *dentry, struct inode *inode,
+	const char *name, const void *value, size_t size, int flags)
+{
+	return yaffs_internal_setxattr(dentry, inode, name, value, size, flags);
+}
+#else
+static int yaffs_setxattr(struct dentry *dentry, const char *name,
+		   const void *value, size_t size, int flags)
+{
+	return yaffs_internal_setxattr(dentry, dentry->d_inode, name, value, size, flags);
+}
+#endif
+
+
+static ssize_t yaffs_internal_getxattr(struct dentry * dentry, struct inode *inode,
 	const char *name, void *buff, size_t size)
 {
-#else
-static ssize_t yaffs_getxattr(struct dentry * dentry, const char *name,
-			void *buff, size_t size)
-{
-	struct inode *inode = dentry->d_inode;
-#endif
 	int error = 0;
 	struct yaffs_dev *dev;
 	struct yaffs_obj *obj = yaffs_inode_to_obj(inode);
@@ -1004,6 +1012,28 @@ static ssize_t yaffs_getxattr(struct dentry * dentry, const char *name,
 	return error;
 }
 
+#if defined(YAFFS_USE_SEPARATE_XATTR)
+static ssize_t yaffs_getxattr(const struct xattr_handler *handler, struct dentry * dentry, struct inode *inode,
+	const char *short_name, void *buff, size_t size)
+{
+	return yaffs_internal_getxattr(dentry, inode, xattr_full_name(handler, short_name),
+		buff, size);
+}
+#elif (YAFFS_NEW_XATTR > 0)
+static ssize_t yaffs_getxattr(struct dentry * dentry, struct inode *inode,
+	const char *name, void *buff, size_t size)
+{
+	return yaffs_internal_getxattr(dentry, inode, name, buff, size);
+}
+#else
+static ssize_t yaffs_getxattr(struct dentry * dentry, const char *name,
+			void *buff, size_t size)
+{
+	return yaffs_internal_getxattr(dentry, dentry->d_inode, name, buff, size);
+}
+#endif
+
+#ifndef YAFFS_USE_SEPARATE_XATTR
 static int yaffs_removexattr(struct dentry *dentry, const char *name)
 {
 	struct inode *inode = dentry->d_inode;
@@ -1059,7 +1089,7 @@ static ssize_t yaffs_listxattr(struct dentry * dentry, char *buff, size_t size)
 
 static const struct inode_operations yaffs_file_inode_operations = {
 	.setattr = yaffs_setattr,
-#ifdef YAFFS_USE_XATTR
+#ifndef YAFFS_USE_SEPARATE_XATTR
 	.setxattr = yaffs_setxattr,
 	.getxattr = yaffs_getxattr,
 	.removexattr = yaffs_removexattr,
@@ -1067,6 +1097,32 @@ static const struct inode_operations yaffs_file_inode_operations = {
 	.listxattr = yaffs_listxattr,
 };
 
+#ifdef YAFFS_USE_SEPARATE_XATTR
+static struct xattr_handler yaffs_xattr_user_handler = {
+	.prefix	= XATTR_USER_PREFIX,
+	.get	= yaffs_getxattr,
+	.set	= yaffs_setxattr,
+};
+
+static struct xattr_handler yaffs_xattr_trusted_handler = {
+	.prefix	= XATTR_TRUSTED_PREFIX,
+	.get	= yaffs_getxattr,
+	.set	= yaffs_setxattr,
+};
+
+static struct xattr_handler yaffs_xattr_security_handler = {
+	.prefix	= XATTR_SECURITY_PREFIX,
+	.get	= yaffs_getxattr,
+	.set	= yaffs_setxattr,
+};
+
+const struct xattr_handler *yaffs_xattr_handlers[] = {
+	&yaffs_xattr_user_handler,
+	&yaffs_xattr_trusted_handler,
+	&yaffs_xattr_security_handler,
+	NULL,
+};
+#endif
 
 static int yaffs_readlink(struct dentry *dentry, char __user * buffer,
 			  int buflen)
@@ -1188,7 +1244,7 @@ static const struct inode_operations yaffs_symlink_inode_operations = {
 	.put_link = yaffs_put_link,
 #endif
 	.setattr = yaffs_setattr,
-#ifdef YAFFS_USE_XATTR
+#ifndef YAFFS_USE_SEPARATE_XATTR
 	.setxattr = yaffs_setxattr,
 	.getxattr = yaffs_getxattr,
 	.removexattr = yaffs_removexattr,
@@ -1670,7 +1726,7 @@ static const struct inode_operations yaffs_dir_inode_operations = {
 	.rename = yaffs_rename,
 	.setattr = yaffs_setattr,
 	.listxattr = yaffs_listxattr,
-#ifdef YAFFS_USE_XATTR
+#ifndef YAFFS_USE_SEPARATE_XATTR
 	.setxattr = yaffs_setxattr,
 	.getxattr = yaffs_getxattr,
 	.removexattr = yaffs_removexattr,
@@ -2860,6 +2916,9 @@ static struct super_block *yaffs_internal_read_super(int yaffs_version,
 
 	sb->s_magic = YAFFS_MAGIC;
 	sb->s_op = &yaffs_super_ops;
+#ifdef YAFFS_USE_SEPARATE_XATTR
+	sb->s_xattr = yaffs_xattr_handlers;
+#endif
 	sb->s_flags |= MS_NOATIME;
 
 	read_only = ((sb->s_flags & MS_RDONLY) != 0);
